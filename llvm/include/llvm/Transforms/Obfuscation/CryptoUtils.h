@@ -27,6 +27,9 @@ namespace llvm {
 
 class CryptoUtils;
 extern ManagedStatic<CryptoUtils> cryptoutils;
+/// Initializes the process-wide obfuscation PRNG on first use.  A non-default
+/// -aesSeed value produces deterministic output; the default uses time entropy.
+void initializeObfuscationPRNG();
 class CryptoUtils {
 public:
   CryptoUtils();

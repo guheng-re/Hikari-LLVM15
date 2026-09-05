@@ -40,7 +40,15 @@ llvm_config.with_environment('PATH', config.llvm_tools_dir, append_path=True)
 
 # Propagate some variables from the host environment.
 llvm_config.with_system_environment(
-    ['HOME', 'INCLUDE', 'LIB', 'TMP', 'TEMP'])
+    ['HOME', 'INCLUDE', 'LIB', 'TMP', 'TEMP', 'VMP_AARCH64_RUNNER'])
+
+# A target runner is intentionally supplied by the environment.  The VMP
+# regression suite remains useful on hosts without an AArch64 device or
+# emulator; only the target-execution tests require this feature.
+vmp_aarch64_runner = os.environ.get('VMP_AARCH64_RUNNER', '').strip()
+if vmp_aarch64_runner:
+    config.available_features.add('vmp-aarch64-runner')
+    config.substitutions.append(('%vmp_aarch64_runner', vmp_aarch64_runner))
 
 
 # Set up OCAMLPATH to include newly built OCaml libraries.

@@ -1,4 +1,5 @@
-// For open-source license, please refer to [License](https://github.com/HikariObfuscator/Hikari/wiki/License).
+// For open-source license, please refer to
+// [License](https://github.com/HikariObfuscator/Hikari/wiki/License).
 //===----------------------------------------------------------------------===//
 /*
   Hikari 's own "Pass Scheduler".
@@ -6,12 +7,11 @@
   Ref : http://lists.llvm.org/pipermail/llvm-dev/2011-February/038109.html
 */
 #include "llvm/Transforms/Obfuscation/Obfuscation.h"
+#include "llvm/ADT/SmallVector.h"
 #include <iostream>
 using namespace llvm;
 using namespace std;
 // Begin Obfuscator Options
-static cl::opt<uint64_t> AesSeed("aesSeed", cl::init(0x1337),
-                                    cl::desc("seed for the PRNG"));
 static cl::opt<bool> EnableAntiClassDump("enable-acdobf", cl::init(false),
                                          cl::NotHidden,
                                          cl::desc("Enable AntiClassDump."));
@@ -45,36 +45,36 @@ static cl::opt<bool>
 // End Obfuscator Options
 
 static void LoadEnv() {
- if (getenv("SPLITOBF")) {
-   EnableBasicBlockSplit = true;
- }
- if (getenv("SUBOBF")) {
-   EnableSubstitution = true;
- }
- if (getenv("ALLOBF")) {
-   EnableAllObfuscation = true;
- }
- if (getenv("FCO")) {
-   EnableFunctionCallObfuscate = true;
- }
- if (getenv("STRCRY")) {
-   EnableStringEncryption = true;
- }
- if (getenv("INDIBRAN")) {
-   EnableIndirectBranching = true;
- }
- if (getenv("FUNCWRA")) {
-   EnableFunctionWrapper = true;//Broken
- }
- if (getenv("BCFOBF")) {
-   EnableBogusControlFlow = true;
- }
- if (getenv("ACDOBF")) {
-   EnableAntiClassDump = true;
- }
- if (getenv("CFFOBF")) {
-   EnableFlattening = true;
- }
+  if (getenv("SPLITOBF")) {
+    EnableBasicBlockSplit = true;
+  }
+  if (getenv("SUBOBF")) {
+    EnableSubstitution = true;
+  }
+  if (getenv("ALLOBF")) {
+    EnableAllObfuscation = true;
+  }
+  if (getenv("FCO")) {
+    EnableFunctionCallObfuscate = true;
+  }
+  if (getenv("STRCRY")) {
+    EnableStringEncryption = true;
+  }
+  if (getenv("INDIBRAN")) {
+    EnableIndirectBranching = true;
+  }
+  if (getenv("FUNCWRA")) {
+    EnableFunctionWrapper = true; // Broken
+  }
+  if (getenv("BCFOBF")) {
+    EnableBogusControlFlow = true;
+  }
+  if (getenv("ACDOBF")) {
+    EnableAntiClassDump = true;
+  }
+  if (getenv("CFFOBF")) {
+    EnableFlattening = true;
+  }
 }
 namespace llvm {
 struct Obfuscation : public ModulePass {
@@ -86,8 +86,8 @@ struct Obfuscation : public ModulePass {
   bool runOnModule(Module &M) override {
 #if LLVM_VERSION_MAJOR >= 15
     bool OpaquePointersHasBeenSet = false;
-    if (EnableAllObfuscation || EnableAntiClassDump || EnableStringEncryption || EnableFlattening || EnableIndirectBranching ||
-        EnableBogusControlFlow) {
+    if (EnableAllObfuscation || EnableAntiClassDump || EnableStringEncryption ||
+        EnableFlattening || EnableIndirectBranching || EnableBogusControlFlow) {
       // TODO: Update Obfuscation Passes to Opaque Pointers
       if (!M.getContext().supportsTypedPointers()) {
         OpaquePointersHasBeenSet = true;
@@ -95,6 +95,10 @@ struct Obfuscation : public ModulePass {
       }
     }
 #endif
+    // VMP must record explicit marker calls before the scheduler removes the
+    // hikari_* declarations used by readFlag(). The actual VMP pass runs at
+    // the optimizer end.
+    prepareVMPSelection(M);
     // Initial ACD Pass
     if (EnableAllObfuscation || EnableAntiClassDump) {
       ModulePass *P = createAntiClassDumpPass();
@@ -108,14 +112,14 @@ struct Obfuscation : public ModulePass {
     FP->doInitialization(M);
     for (Module::iterator iter = M.begin(); iter != M.end(); iter++) {
       Function &F = *iter;
-      if (!F.isDeclaration()) {
+      if (!F.isDeclaration() && !F.hasFnAttribute("hikari.vmp.selected")) {
         FP->runOnFunction(F);
       }
     }
     delete FP;
     // Now Encrypt Strings
     ModulePass *MP = createStringEncryptionPass(EnableAllObfuscation ||
-                                    EnableStringEncryption);
+                                                EnableStringEncryption);
     MP->runOnModule(M);
     delete MP;
     /*
@@ -132,6 +136,10 @@ struct Obfuscation : public ModulePass {
     for (Module::iterator iter = M.begin(); iter != M.end(); iter++) {
       Function &F = *iter;
       if (!F.isDeclaration()) {
+        // VMP owns the selected function body. Its late bytecode compiler
+        // consumes the unmodified integer control-flow graph.
+        if (F.hasFnAttribute("hikari.vmp.selected"))
+          continue;
         FunctionPass *P = NULL;
         P = createSplitBasicBlockPass(EnableAllObfuscation ||
                                       EnableBasicBlockSplit);
@@ -157,7 +165,8 @@ struct Obfuscation : public ModulePass {
       funcs.push_back(&*iter);
     }
     for (Function *F : funcs) {
-      P->runOnFunction(*F);
+      if (!F->hasFnAttribute("hikari.vmp.selected"))
+        P->runOnFunction(*F);
     }
     delete P;
     MP = createFunctionWrapperPass(EnableAllObfuscation ||
@@ -168,13 +177,14 @@ struct Obfuscation : public ModulePass {
     vector<Function *> toDelete;
     for (Module::iterator iter = M.begin(); iter != M.end(); iter++) {
       Function &F = *iter;
-      if (F.isDeclaration() && F.hasName() &&
-          F.getName().contains("hikari_")) {
+      if (F.isDeclaration() && F.hasName() && F.getName().contains("hikari_")) {
+        SmallVector<Instruction *, 8> markerCalls;
         for (User *U : F.users()) {
-          if (Instruction *Inst = dyn_cast<Instruction>(U)) {
-            Inst->eraseFromParent();
-          }
+          if (Instruction *Inst = dyn_cast<Instruction>(U))
+            markerCalls.push_back(Inst);
         }
+        for (Instruction *Inst : markerCalls)
+          Inst->eraseFromParent();
         toDelete.push_back(&F);
       }
     }
@@ -196,13 +206,9 @@ struct Obfuscation : public ModulePass {
 };
 ModulePass *createObfuscationLegacyPass() {
   LoadEnv();
-  if (AesSeed!=0x1337) {
-    cryptoutils->prng_seed(AesSeed);
-  }
-  else{
-    cryptoutils->prng_seed();
-  }
-  cout<<"Initializing Hikari Core with Revision ID:"<<GIT_COMMIT_HASH<<endl;
+  initializeObfuscationPRNG();
+  cout << "Initializing Hikari Core with Revision ID:" << GIT_COMMIT_HASH
+       << endl;
   return new Obfuscation();
 }
 
@@ -224,4 +230,5 @@ INITIALIZE_PASS_DEPENDENCY(IndirectBranch);
 INITIALIZE_PASS_DEPENDENCY(SplitBasicBlock);
 INITIALIZE_PASS_DEPENDENCY(StringEncryption);
 INITIALIZE_PASS_DEPENDENCY(Substitution);
+INITIALIZE_PASS_DEPENDENCY(Virtualization);
 INITIALIZE_PASS_END(Obfuscation, "obfus", "Enable Obfuscation", true, true)

@@ -239,6 +239,22 @@ add_lit_testsuite(check-llvm "Running the LLVM regression tests"
   )
 set_target_properties(check-llvm PROPERTIES FOLDER "Tests")
 
+# Keep VMP coverage independently runnable.  This target deliberately uses
+# the normal CMake-generated lit site configuration instead of loading the
+# source configuration directly, so it has the same substitutions and tool
+# discovery as the regular LLVM test suite.
+set(VMP_OBFUSCATION_TEST_DEPENDS ${LLVM_TEST_DEPENDS} LLVMObfuscation)
+if(TARGET clang)
+  list(APPEND VMP_OBFUSCATION_TEST_DEPENDS clang)
+endif()
+add_lit_testsuite(check-vmp-obfuscation
+  "Running the VMP obfuscation regression tests"
+  ${CMAKE_CURRENT_BINARY_DIR}/Transforms/Obfuscation
+  EXCLUDE_FROM_CHECK_ALL
+  DEPENDS ${VMP_OBFUSCATION_TEST_DEPENDS}
+  )
+set_target_properties(check-vmp-obfuscation PROPERTIES FOLDER "Tests")
+
 add_lit_testsuites(LLVM ${CMAKE_CURRENT_SOURCE_DIR}
   ${exclude_from_check_all}
   DEPENDS ${LLVM_TEST_DEPENDS}

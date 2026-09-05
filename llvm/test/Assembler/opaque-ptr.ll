@@ -123,6 +123,14 @@ define void @atomicrmw(ptr %a, i32 %i) {
     ret void
 }
 
+; CHECK: define void @atomicrmw_ptr(ptr %cell, ptr %new)
+; CHECK:     %b = atomicrmw xchg ptr %cell, ptr %new acquire
+; CHECK:     ret void
+define void @atomicrmw_ptr(ptr %cell, ptr %new) {
+    %b = atomicrmw xchg ptr %cell, ptr %new acquire
+    ret void
+}
+
 ; CHECK: define void @call(ptr %p)
 ; CHECK:     call void %p()
 ; CHECK:     ret void

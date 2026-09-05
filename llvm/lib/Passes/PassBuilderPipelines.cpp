@@ -237,6 +237,14 @@ static void addAnnotationRemarksPass(ModulePassManager &MPM) {
   MPM.addPass(createModuleToFunctionPassAdaptor(AnnotationRemarksPass()));
 }
 
+// VMP must run after the optimizer has finished simplifying and inlining the
+// module so it can replace the selected function body with its bytecode
+// interpreter without later IR optimizations dismantling the dispatcher.
+static void addVirtualizationPass(ModulePassManager &MPM) {
+  MPM.addPass(createModuleToFunctionPassAdaptor(VirtualizationPass()));
+  MPM.addPass(createModuleToFunctionPassAdaptor(VMPPostFlatteningPass()));
+}
+
 // Helper to check if the current compilation phase is preparing for LTO
 static bool isLTOPreLink(ThinOrFullLTOPhase Phase) {
   return Phase == ThinOrFullLTOPhase::ThinLTOPreLink ||
@@ -1298,6 +1306,9 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
   if (!LTOPreLink)
     MPM.addPass(RelLookupTableConverterPass());
 
+  if (!LTOPreLink)
+    addVirtualizationPass(MPM);
+
   return MPM;
 }
 
@@ -1501,6 +1512,8 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
     for (auto &C : FullLinkTimeOptimizationLastEPCallbacks)
       C(MPM, Level);
 
+    addVirtualizationPass(MPM);
+
     // Emit annotation remarks.
     addAnnotationRemarksPass(MPM);
 
@@ -1582,6 +1595,8 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
 
     for (auto &C : FullLinkTimeOptimizationLastEPCallbacks)
       C(MPM, Level);
+
+    addVirtualizationPass(MPM);
 
     // Emit annotation remarks.
     addAnnotationRemarksPass(MPM);
@@ -1765,6 +1780,8 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
   for (auto &C : FullLinkTimeOptimizationLastEPCallbacks)
     C(MPM, Level);
 
+  addVirtualizationPass(MPM);
+
   // Emit annotation remarks.
   addAnnotationRemarksPass(MPM);
 
@@ -1872,6 +1889,9 @@ ModulePassManager PassBuilder::buildO0DefaultPipeline(OptimizationLevel Level,
 
   for (auto &C : OptimizerLastEPCallbacks)
     C(MPM, Level);
+
+  if (!LTOPreLink)
+    addVirtualizationPass(MPM);
 
   if (LTOPreLink)
     addRequiredLTOPreLinkPasses(MPM);

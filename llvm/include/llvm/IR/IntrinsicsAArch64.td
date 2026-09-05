@@ -551,6 +551,10 @@ let TargetPrefix = "aarch64" in {  // All intrinsics start with "llvm.aarch64.".
   class AdvSIMD_1Vec_Load_Intrinsic
       : DefaultAttrsIntrinsic<[llvm_anyvector_ty], [LLVMAnyPointerType<LLVMMatchType<0>>],
                   [IntrReadMem, IntrArgMemOnly]>;
+  class AdvSIMD_1Vec_Load_Lane_Intrinsic
+    : DefaultAttrsIntrinsic<[llvm_anyvector_ty],
+                [LLVMMatchType<0>, llvm_i64_ty, llvm_anyptr_ty],
+                [IntrReadMem, IntrArgMemOnly]>;
   class AdvSIMD_1Vec_Store_Lane_Intrinsic
     : DefaultAttrsIntrinsic<[], [llvm_anyvector_ty, llvm_i64_ty, llvm_anyptr_ty],
                 [IntrArgMemOnly, NoCapture<ArgIndex<2>>]>;
@@ -630,6 +634,7 @@ def int_aarch64_neon_ld2 : AdvSIMD_2Vec_Load_Intrinsic;
 def int_aarch64_neon_ld3 : AdvSIMD_3Vec_Load_Intrinsic;
 def int_aarch64_neon_ld4 : AdvSIMD_4Vec_Load_Intrinsic;
 
+def int_aarch64_neon_ld1lane : AdvSIMD_1Vec_Load_Lane_Intrinsic;
 def int_aarch64_neon_ld2lane : AdvSIMD_2Vec_Load_Lane_Intrinsic;
 def int_aarch64_neon_ld3lane : AdvSIMD_3Vec_Load_Lane_Intrinsic;
 def int_aarch64_neon_ld4lane : AdvSIMD_4Vec_Load_Lane_Intrinsic;
@@ -642,6 +647,7 @@ def int_aarch64_neon_st2  : AdvSIMD_2Vec_Store_Intrinsic;
 def int_aarch64_neon_st3  : AdvSIMD_3Vec_Store_Intrinsic;
 def int_aarch64_neon_st4  : AdvSIMD_4Vec_Store_Intrinsic;
 
+def int_aarch64_neon_st1lane  : AdvSIMD_1Vec_Store_Lane_Intrinsic;
 def int_aarch64_neon_st2lane  : AdvSIMD_2Vec_Store_Lane_Intrinsic;
 def int_aarch64_neon_st3lane  : AdvSIMD_3Vec_Store_Lane_Intrinsic;
 def int_aarch64_neon_st4lane  : AdvSIMD_4Vec_Store_Lane_Intrinsic;

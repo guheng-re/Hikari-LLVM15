@@ -13,6 +13,7 @@
 #endif
 void fixStack(llvm::Function *f);
 std::string readAnnotate(llvm::Function *f);
+bool readFlag(llvm::Function *f, std::string attribute);
 std::map<llvm::GlobalValue*,llvm::StringRef> BuildAnnotateMap(llvm::Module& M);
 bool toObfuscate(bool flag, llvm::Function *f, std::string attribute);
 void FixBasicBlockConstantExpr(llvm::BasicBlock *BB);

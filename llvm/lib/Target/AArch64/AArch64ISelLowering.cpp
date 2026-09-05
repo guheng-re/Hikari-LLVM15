@@ -12404,6 +12404,7 @@ bool AArch64TargetLowering::getTgtMemIntrinsic(IntrinsicInfo &Info,
   case Intrinsic::aarch64_neon_ld1x2:
   case Intrinsic::aarch64_neon_ld1x3:
   case Intrinsic::aarch64_neon_ld1x4:
+  case Intrinsic::aarch64_neon_ld1lane:
   case Intrinsic::aarch64_neon_ld2lane:
   case Intrinsic::aarch64_neon_ld3lane:
   case Intrinsic::aarch64_neon_ld4lane:
@@ -12427,6 +12428,7 @@ bool AArch64TargetLowering::getTgtMemIntrinsic(IntrinsicInfo &Info,
   case Intrinsic::aarch64_neon_st1x2:
   case Intrinsic::aarch64_neon_st1x3:
   case Intrinsic::aarch64_neon_st1x4:
+  case Intrinsic::aarch64_neon_st1lane:
   case Intrinsic::aarch64_neon_st2lane:
   case Intrinsic::aarch64_neon_st3lane:
   case Intrinsic::aarch64_neon_st4lane: {

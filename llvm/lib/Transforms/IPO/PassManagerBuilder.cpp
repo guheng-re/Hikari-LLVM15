@@ -603,6 +603,9 @@ void PassManagerBuilder::populateModulePassManager(
 
     addExtensionsToPM(EP_EnabledOnOptLevel0, MPM);
 
+    MPM.add(createVirtualizationPass());
+    MPM.add(createVMPPostFlatteningPass());
+
     MPM.add(createAnnotationRemarksLegacyPass());
     return;
   }
@@ -799,6 +802,9 @@ void PassManagerBuilder::populateModulePassManager(
       SimplifyCFGOptions().convertSwitchRangeToICmp(true)));
 
   addExtensionsToPM(EP_OptimizerLast, MPM);
+
+  MPM.add(createVirtualizationPass());
+  MPM.add(createVMPPostFlatteningPass());
 
   MPM.add(createAnnotationRemarksLegacyPass());
 }

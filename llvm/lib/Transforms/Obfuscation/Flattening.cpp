@@ -2,6 +2,10 @@
 //===----------------------------------------------------------------------===//
 #include "llvm/Transforms/Obfuscation/Obfuscation.h"
 #include "llvm/Transforms/Obfuscation/CryptoUtils.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Triple.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/PromoteMemToReg.h"
 #include "llvm/IR/InstIterator.h"
 #if LLVM_VERSION_MAJOR >= 9
@@ -11,36 +15,236 @@
 using namespace llvm;
 
 namespace {
+static cl::opt<unsigned> VMPPostCFFMaxBlocks(
+    "vmp-post-cff-max-blocks", cl::init(256), cl::NotHidden,
+    cl::desc("Maximum number of blocks accepted by VMP post-CFF."));
+static cl::opt<unsigned> VMPPostCFFMaxInsts(
+    "vmp-post-cff-max-insts", cl::init(8192), cl::NotHidden,
+    cl::desc("Maximum number of instructions accepted by VMP post-CFF."));
+
+static constexpr StringLiteral VMPVirtualizedAttribute =
+    "hikari.vmp.virtualized";
+static constexpr StringLiteral VMPPostCFFSelectionAttribute =
+    "hikari.vmp.post.cff";
+static constexpr StringLiteral VMPPostCFFAppliedAttribute =
+    "hikari.vmp.post.cff.applied";
+
 struct Flattening : public FunctionPass {
   static char ID; // Pass identification, replacement for typeid
   bool flag;
   Flattening() : FunctionPass(ID) { this->flag = true; }
   Flattening(bool flag) : FunctionPass(ID) { this->flag = flag; }
   bool runOnFunction(Function &F) override;
-  bool flatten(Function *f);
+  bool flatten(Function *f, bool PreserveVMPState = false);
 };
+
+struct VMPPostFlattening : public FunctionPass {
+  static char ID;
+  VMPPostFlattening() : FunctionPass(ID) {}
+  bool runOnFunction(Function &F) override;
+};
+
+static void reportVMPPostCFFSkip(const Function &F, StringRef Reason) {
+  errs() << "Skipping VMP post-CFF on " << F.getName() << ": " << Reason
+         << "\n";
+}
+
+static bool isAArch64Module(const Function &F) {
+  return Triple(F.getParent()->getTargetTriple()).isAArch64();
+}
+
+static bool hasUnsupportedVMPPostCFFSSA(const Function &F) {
+  for (const BasicBlock &BB : F) {
+    for (const Instruction &I : BB) {
+      // The regular CFF pass repairs these values with fixStack().  That
+      // operation is intentionally forbidden for the VMP interpreter because
+      // it can rewrite volatile VM state accesses.
+      if (isa<PHINode>(I))
+        return true;
+      if (!isa<AllocaInst>(I) && I.isUsedOutsideOfBlock(&BB))
+        return true;
+    }
+  }
+  return false;
+}
+
+static LoadInst *materializeVMPDispatchCondition(Function &F) {
+  SwitchInst *DispatchSwitch = nullptr;
+  for (BasicBlock &BB : F) {
+    if (auto *Switch = dyn_cast<SwitchInst>(BB.getTerminator())) {
+      if (BB.getName() != "vmp.dispatch" || DispatchSwitch)
+        return nullptr;
+      DispatchSwitch = Switch;
+    }
+  }
+  if (!DispatchSwitch)
+    return nullptr;
+
+  Instruction *EntryInsertion =
+      &*F.getEntryBlock().getFirstInsertionPt();
+  Type *ConditionTy = DispatchSwitch->getCondition()->getType();
+  auto *ConditionSlot = new AllocaInst(ConditionTy, 0,
+                                       "vmp.post.cff.opcode", EntryInsertion);
+  new StoreInst(DispatchSwitch->getCondition(), ConditionSlot, DispatchSwitch);
+  auto *ConditionLoad = new LoadInst(ConditionTy, ConditionSlot,
+                                     "vmp.post.cff.opcode.load", DispatchSwitch);
+  DispatchSwitch->setCondition(ConditionLoad);
+  return ConditionLoad;
+}
+
+static void localizeLoweredSwitchCondition(LoadInst *ConditionLoad) {
+  SmallVector<Use *, 16> CrossBlockUses;
+  BasicBlock *ConditionBlock = ConditionLoad->getParent();
+  for (Use &U : ConditionLoad->uses()) {
+    auto *User = dyn_cast<Instruction>(U.getUser());
+    if (User && User->getParent() != ConditionBlock)
+      CrossBlockUses.push_back(&U);
+  }
+
+  for (Use *U : CrossBlockUses) {
+    auto *User = cast<Instruction>(U->getUser());
+    auto *LocalLoad = new LoadInst(ConditionLoad->getType(),
+                                   ConditionLoad->getPointerOperand(),
+                                   "vmp.post.cff.opcode.load", User);
+    U->set(LocalLoad);
+  }
+}
+
+/// deleteBody() drops hung-off operands (personality / prefix /
+/// prologue), function metadata, and forces ExternalLinkage.
+/// VMP already restored personality on the virtualized shell; post-CFF
+/// must not throw that Function-level state away.
+struct SavedFunctionLevelState {
+  GlobalValue::LinkageTypes Linkage = GlobalValue::ExternalLinkage;
+  Constant *Personality = nullptr;
+  Constant *Prefix = nullptr;
+  Constant *Prologue = nullptr;
+  SmallVector<std::pair<unsigned, MDNode *>, 8> Metadata;
+};
+
+static SavedFunctionLevelState saveFunctionLevelState(const Function &F) {
+  SavedFunctionLevelState S;
+  S.Linkage = F.getLinkage();
+  if (F.hasPersonalityFn())
+    S.Personality = F.getPersonalityFn();
+  if (F.hasPrefixData())
+    S.Prefix = F.getPrefixData();
+  if (F.hasPrologueData())
+    S.Prologue = F.getPrologueData();
+  F.getAllMetadata(S.Metadata);
+  return S;
+}
+
+static void restoreFunctionLevelState(Function &F,
+                                      const SavedFunctionLevelState &S) {
+  F.setLinkage(S.Linkage);
+  if (S.Personality)
+    F.setPersonalityFn(S.Personality);
+  if (S.Prefix)
+    F.setPrefixData(S.Prefix);
+  if (S.Prologue)
+    F.setPrologueData(S.Prologue);
+  for (const auto &MD : S.Metadata)
+    F.setMetadata(MD.first, MD.second);
+}
+
+static Function *cloneVMPPostCFFCandidate(Function &F) {
+  Module *M = F.getParent();
+  Function *Candidate = Function::Create(
+      F.getFunctionType(), GlobalValue::PrivateLinkage, F.getAddressSpace(),
+      F.getName() + ".vmp.post.cff.candidate", M);
+
+  ValueToValueMapTy VMap;
+  // Preserve recursion and direct calls to the original public symbol.  This
+  // also keeps the temporary clone isolated from the program ABI.
+  VMap[&F] = &F;
+  Function::arg_iterator NewArg = Candidate->arg_begin();
+  for (Argument &OldArg : F.args())
+    VMap[&OldArg] = &*NewArg++;
+
+  SmallVector<ReturnInst *, 8> Returns;
+  CloneFunctionInto(Candidate, &F, VMap,
+                    CloneFunctionChangeType::LocalChangesOnly, Returns);
+  Candidate->setDSOLocal(true);
+  return Candidate;
+}
+
+static bool flattenVMPPostCFF(Function &F) {
+  if (F.size() > VMPPostCFFMaxBlocks) {
+    reportVMPPostCFFSkip(F, "basic-block budget exceeded");
+    return false;
+  }
+  if (F.getInstructionCount() > VMPPostCFFMaxInsts) {
+    reportVMPPostCFFSkip(F, "instruction budget exceeded");
+    return false;
+  }
+  if (hasUnsupportedVMPPostCFFSSA(F)) {
+    reportVMPPostCFFSkip(F, "cross-block SSA requires fixStack");
+    return false;
+  }
+
+  Function *Candidate = cloneVMPPostCFFCandidate(F);
+  Flattening CFF(false);
+  if (!CFF.flatten(Candidate, true) || verifyFunction(*Candidate, &errs())) {
+    reportVMPPostCFFSkip(F, "candidate flattening or verification failed");
+    Candidate->eraseFromParent();
+    return false;
+  }
+
+  Function::arg_iterator OriginalArg = F.arg_begin();
+  for (Argument &CandidateArg : Candidate->args())
+    CandidateArg.replaceAllUsesWith(&*OriginalArg++);
+
+  const SavedFunctionLevelState Saved = saveFunctionLevelState(F);
+  F.deleteBody();
+  restoreFunctionLevelState(F, Saved);
+  F.getBasicBlockList().splice(F.begin(), Candidate->getBasicBlockList());
+  Candidate->eraseFromParent();
+  F.addFnAttr(VMPPostCFFAppliedAttribute);
+  return true;
+}
 } // namespace
 
 char Flattening::ID = 0;
+char VMPPostFlattening::ID = 0;
 FunctionPass *llvm::createFlatteningPass(bool flag) {
   return new Flattening(flag);
 }
 FunctionPass *llvm::createFlatteningPass() { return new Flattening(); }
 INITIALIZE_PASS(Flattening, "cffobf", "Enable Control Flow Flattening.", true,
                 true)
+INITIALIZE_PASS(VMPPostFlattening, "vmp-post-cff",
+                "Flatten virtualized VMP interpreter control flow.", true,
+                true)
+FunctionPass *llvm::createVMPPostFlatteningPass() {
+  return new VMPPostFlattening();
+}
 bool Flattening::runOnFunction(Function &F) {
   Function *tmp = &F;
   // Do we obfuscate
   if (toObfuscate(flag, tmp, "fla")) {
     errs() << "Running ControlFlowFlattening On " << F.getName() << "\n";
-    flatten(tmp);
-    return true; // https://github.com/eshard/obfuscator-llvm/commit/06ea85faba32a0c7032e0e31ea7cb95e9af0f455
+    return flatten(tmp);
   }
 
   return false;
 }
 
-bool Flattening::flatten(Function *f) {
+bool VMPPostFlattening::runOnFunction(Function &F) {
+  if (!F.hasFnAttribute(VMPVirtualizedAttribute) ||
+      !F.hasFnAttribute(VMPPostCFFSelectionAttribute) ||
+      F.hasFnAttribute(VMPPostCFFAppliedAttribute) || !isAArch64Module(F))
+    return false;
+  return flattenVMPPostCFF(F);
+}
+
+PreservedAnalyses llvm::VMPPostFlatteningPass::run(
+    Function &F, FunctionAnalysisManager &) {
+  return VMPPostFlattening().runOnFunction(F) ? PreservedAnalyses::none()
+                                               : PreservedAnalyses::all();
+}
+
+bool Flattening::flatten(Function *f, bool PreserveVMPState) {
   vector<BasicBlock *> origBB;
   BasicBlock *loopEntry;
   BasicBlock *loopEnd;
@@ -53,6 +257,12 @@ bool Flattening::flatten(Function *f) {
   // END OF SCRAMBLER
 
   // Lower switch
+  LoadInst *VMPDispatchCondition = nullptr;
+  if (PreserveVMPState) {
+    VMPDispatchCondition = materializeVMPDispatchCondition(*f);
+    if (!VMPDispatchCondition)
+      return false;
+  }
 #if LLVM_VERSION_MAJOR >= 9
   FunctionPass *lower = createLegacyLowerSwitchPass();
   lower->runOnFunction(*f);
@@ -60,6 +270,8 @@ bool Flattening::flatten(Function *f) {
   FunctionPass *lower = createLowerSwitchPass();
   lower->runOnFunction(*f);
 #endif
+  if (PreserveVMPState)
+    localizeLoweredSwitchCondition(VMPDispatchCondition);
 
   // Save all original BB
   for (Function::iterator i = f->begin(); i != f->end(); ++i) {
@@ -71,7 +283,9 @@ bool Flattening::flatten(Function *f) {
     origBB.push_back(tmp);
 
     BasicBlock *bb = &*i;
-    if (!isa<BranchInst>(bb->getTerminator()) && !isa<ReturnInst>(bb->getTerminator())) {
+    if (!isa<BranchInst>(bb->getTerminator()) &&
+        !isa<ReturnInst>(bb->getTerminator()) &&
+        !(PreserveVMPState && isa<UnreachableInst>(bb->getTerminator()))) {
       return false;
     }
   }
@@ -123,7 +337,8 @@ bool Flattening::flatten(Function *f) {
   loopEnd = BasicBlock::Create(f->getContext(), "loopEnd", f, insert);
 
 #if LLVM_VERSION_MAJOR >= 15
-  load = new LoadInst(switchVar->getType()->getNonOpaquePointerElementType(), switchVar, "switchVar", loopEntry);
+  load = new LoadInst(Type::getInt32Ty(f->getContext()), switchVar,
+                      "switchVar", loopEntry);
 #elif LLVM_VERSION_MAJOR >= 14
   load = new LoadInst(switchVar->getType()->getPointerElementType(), switchVar, "switchVar", loopEntry);
 #elif LLVM_VERSION_MAJOR >= 10
@@ -239,9 +454,11 @@ bool Flattening::flatten(Function *f) {
       continue;
     }
   }
-  errs()<<"Fixing Stack\n";
-  fixStack(f);
-  errs()<<"Fixed Stack\n";
+  if (!PreserveVMPState) {
+    errs()<<"Fixing Stack\n";
+    fixStack(f);
+    errs()<<"Fixed Stack\n";
+  }
 
   return true;
 }

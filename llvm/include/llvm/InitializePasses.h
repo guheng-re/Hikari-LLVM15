@@ -441,6 +441,8 @@ void initializeWriteBitcodePassPass(PassRegistry&);
 void initializeWriteThinLTOBitcodePass(PassRegistry&);
 void initializeXRayInstrumentationPass(PassRegistry&);
 void initializeObfuscationPass(PassRegistry &);
+void initializeVirtualizationPass(PassRegistry &);
+void initializeVMPPostFlatteningPass(PassRegistry &);
 
 } // end namespace llvm
 

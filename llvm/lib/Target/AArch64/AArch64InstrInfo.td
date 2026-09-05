@@ -6697,6 +6697,38 @@ defm URSRA   : SIMDVectorRShiftBHSDTied<1, 0b00110, "ursra",
                                (AArch64urshri node:$MHS, node:$RHS))> >;
 defm USHLL   : SIMDVectorLShiftLongBHSD<1, 0b10100, "ushll",
                 BinOpFrag<(AArch64vshl (zext node:$LHS), node:$RHS)>>;
+
+// Native llvm.aarch64.neon.shll / sshll / ushll.  LLVM 15 ISel
+// otherwise only matches AArch64vshl(sext/zext) / by-size ext+shl;
+// clang vshll_n emits that generic IR.  These Pats cover the
+// existing low-half IDs so CallDescriptor replay can select.
+// High-half shll2/sshll2/ushll2 stay extract_high + the same ID
+// (no wide-source intrinsic form).
+def : Pat<(v8i16 (int_aarch64_neon_shll (v8i8 V64:$Rn))),
+          (SHLLv8i8 V64:$Rn)>;
+def : Pat<(v4i32 (int_aarch64_neon_shll (v4i16 V64:$Rn))),
+          (SHLLv4i16 V64:$Rn)>;
+def : Pat<(v2i64 (int_aarch64_neon_shll (v2i32 V64:$Rn))),
+          (SHLLv2i32 V64:$Rn)>;
+def : Pat<(v8i16 (int_aarch64_neon_sshll (v8i8 V64:$Rn),
+                                         (i32 vecshiftL8:$imm))),
+          (SSHLLv8i8_shift V64:$Rn, vecshiftL8:$imm)>;
+def : Pat<(v4i32 (int_aarch64_neon_sshll (v4i16 V64:$Rn),
+                                         (i32 vecshiftL16:$imm))),
+          (SSHLLv4i16_shift V64:$Rn, vecshiftL16:$imm)>;
+def : Pat<(v2i64 (int_aarch64_neon_sshll (v2i32 V64:$Rn),
+                                         (i32 vecshiftL32:$imm))),
+          (SSHLLv2i32_shift V64:$Rn, vecshiftL32:$imm)>;
+def : Pat<(v8i16 (int_aarch64_neon_ushll (v8i8 V64:$Rn),
+                                         (i32 vecshiftL8:$imm))),
+          (USHLLv8i8_shift V64:$Rn, vecshiftL8:$imm)>;
+def : Pat<(v4i32 (int_aarch64_neon_ushll (v4i16 V64:$Rn),
+                                         (i32 vecshiftL16:$imm))),
+          (USHLLv4i16_shift V64:$Rn, vecshiftL16:$imm)>;
+def : Pat<(v2i64 (int_aarch64_neon_ushll (v2i32 V64:$Rn),
+                                         (i32 vecshiftL32:$imm))),
+          (USHLLv2i32_shift V64:$Rn, vecshiftL32:$imm)>;
+
 defm USHR    : SIMDVectorRShiftBHSD<1, 0b00000, "ushr", AArch64vlshr>;
 defm USRA    : SIMDVectorRShiftBHSDTied<1, 0b00010, "usra",
                 TriOpFrag<(add_and_or_is_add node:$LHS, (AArch64vlshr node:$MHS, node:$RHS))> >;

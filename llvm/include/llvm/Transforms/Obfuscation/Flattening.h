@@ -17,6 +17,7 @@
 
 // LLVM include
 #include "llvm/Pass.h"
+#include "llvm/IR/PassManager.h"
 #include "llvm/IR/Function.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Transforms/Utils/Local.h" // For DemoteRegToStack and DemotePHIToStack
@@ -34,6 +35,17 @@ namespace llvm {
 	FunctionPass *createFlatteningPass();
 	FunctionPass *createFlatteningPass(bool flag);
 	void initializeFlatteningPass(PassRegistry &Registry);
+
+  /// Late CFF pass for functions whose bodies have already been virtualized.
+  class VMPPostFlatteningPass
+      : public PassInfoMixin<VMPPostFlatteningPass> {
+  public:
+    PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
+    static bool isRequired() { return true; }
+  };
+
+  FunctionPass *createVMPPostFlatteningPass();
+  void initializeVMPPostFlatteningPass(PassRegistry &Registry);
 
 }
 

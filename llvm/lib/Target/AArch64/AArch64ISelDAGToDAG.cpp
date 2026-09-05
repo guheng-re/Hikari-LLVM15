@@ -1730,21 +1730,37 @@ void AArch64DAGToDAGISel::SelectLoadLane(SDNode *N, unsigned NumVecs,
 
   SDValue RegSeq = createQTuple(Regs);
 
-  const EVT ResTys[] = {MVT::Untyped, MVT::Other};
-
   unsigned LaneNo =
       cast<ConstantSDNode>(N->getOperand(NumVecs + 2))->getZExtValue();
 
   SDValue Ops[] = {RegSeq, CurDAG->getTargetConstant(LaneNo, dl, MVT::i64),
                    N->getOperand(NumVecs + 3), N->getOperand(0)};
+
+  if (NumVecs == 1) {
+    // LD1lane writes a single Q register (possibly narrowed to D), not
+    // a vector-list tuple.  Using Untyped here makes NarrowVector call
+    // getVectorNumElements() on an untyped result.
+    const EVT ResTys[] = {RegSeq.getValueType(), MVT::Other};
+    SDNode *Ld = CurDAG->getMachineNode(Opc, dl, ResTys, Ops);
+    SDValue SuperReg = SDValue(Ld, 0);
+    SDValue NV = SuperReg;
+    if (Narrow)
+      NV = NarrowVector(NV, *CurDAG);
+    ReplaceUses(SDValue(N, 0), NV);
+    ReplaceUses(SDValue(N, 1), SDValue(Ld, 1));
+    CurDAG->RemoveDeadNode(N);
+    return;
+  }
+
+  const EVT ResTys[] = {MVT::Untyped, MVT::Other};
   SDNode *Ld = CurDAG->getMachineNode(Opc, dl, ResTys, Ops);
   SDValue SuperReg = SDValue(Ld, 0);
-
   EVT WideVT = RegSeq.getOperand(1)->getValueType(0);
   static const unsigned QSubs[] = { AArch64::qsub0, AArch64::qsub1,
                                     AArch64::qsub2, AArch64::qsub3 };
   for (unsigned i = 0; i < NumVecs; ++i) {
-    SDValue NV = CurDAG->getTargetExtractSubreg(QSubs[i], dl, WideVT, SuperReg);
+    SDValue NV =
+        CurDAG->getTargetExtractSubreg(QSubs[i], dl, WideVT, SuperReg);
     if (Narrow)
       NV = NarrowVector(NV, *CurDAG);
     ReplaceUses(SDValue(N, i), NV);
@@ -3954,6 +3970,24 @@ void AArch64DAGToDAGISel::Select(SDNode *Node) {
         return;
       }
       break;
+    case Intrinsic::aarch64_neon_ld1lane:
+      if (VT == MVT::v16i8 || VT == MVT::v8i8) {
+        SelectLoadLane(Node, 1, AArch64::LD1i8);
+        return;
+      } else if (VT == MVT::v8i16 || VT == MVT::v4i16 || VT == MVT::v4f16 ||
+                 VT == MVT::v8f16 || VT == MVT::v4bf16 || VT == MVT::v8bf16) {
+        SelectLoadLane(Node, 1, AArch64::LD1i16);
+        return;
+      } else if (VT == MVT::v4i32 || VT == MVT::v2i32 || VT == MVT::v4f32 ||
+                 VT == MVT::v2f32) {
+        SelectLoadLane(Node, 1, AArch64::LD1i32);
+        return;
+      } else if (VT == MVT::v2i64 || VT == MVT::v1i64 || VT == MVT::v2f64 ||
+                 VT == MVT::v1f64) {
+        SelectLoadLane(Node, 1, AArch64::LD1i64);
+        return;
+      }
+      break;
     case Intrinsic::aarch64_neon_ld2lane:
       if (VT == MVT::v16i8 || VT == MVT::v8i8) {
         SelectLoadLane(Node, 2, AArch64::LD2i8);
@@ -4323,6 +4357,25 @@ void AArch64DAGToDAGISel::Select(SDNode *Node) {
         return;
       } else if (VT == MVT::v1i64 || VT == MVT::v1f64) {
         SelectStore(Node, 4, AArch64::ST1Fourv1d);
+        return;
+      }
+      break;
+    }
+    case Intrinsic::aarch64_neon_st1lane: {
+      if (VT == MVT::v16i8 || VT == MVT::v8i8) {
+        SelectStoreLane(Node, 1, AArch64::ST1i8);
+        return;
+      } else if (VT == MVT::v8i16 || VT == MVT::v4i16 || VT == MVT::v4f16 ||
+                 VT == MVT::v8f16 || VT == MVT::v4bf16 || VT == MVT::v8bf16) {
+        SelectStoreLane(Node, 1, AArch64::ST1i16);
+        return;
+      } else if (VT == MVT::v4i32 || VT == MVT::v2i32 || VT == MVT::v4f32 ||
+                 VT == MVT::v2f32) {
+        SelectStoreLane(Node, 1, AArch64::ST1i32);
+        return;
+      } else if (VT == MVT::v2i64 || VT == MVT::v1i64 || VT == MVT::v2f64 ||
+                 VT == MVT::v1f64) {
+        SelectStoreLane(Node, 1, AArch64::ST1i64);
         return;
       }
       break;

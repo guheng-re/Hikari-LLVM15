@@ -25,6 +25,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 using namespace llvm;
 
 #define DEBUG_TYPE "interpreter"
@@ -1117,10 +1118,15 @@ void Interpreter::visitStoreInst(StoreInst &I) {
 
 void Interpreter::visitVAStartInst(VAStartInst &I) {
   ExecutionContext &SF = ECStack.back();
-  GenericValue ArgIndex;
-  ArgIndex.UIntPairVal.first = ECStack.size() - 1;
-  ArgIndex.UIntPairVal.second = 0;
-  SetValue(&I, ArgIndex, SF);
+  // LangRef: llvm.va_start writes the list object in memory.  Store the
+  // interpreter's (frame, index) cursor into that object so later va_arg
+  // can load/update it through any pointer that aliases the same alloca
+  // (including a pointer recovered from a VReg).
+  GenericValue::IntPair Cursor;
+  Cursor.first = static_cast<unsigned>(ECStack.size() - 1);
+  Cursor.second = 0;
+  void *Ptr = GVTOP(getOperandValue(I.getArgOperand(0), SF));
+  std::memcpy(Ptr, &Cursor, sizeof(Cursor));
 }
 
 void Interpreter::visitVAEndInst(VAEndInst &I) {
@@ -1129,7 +1135,11 @@ void Interpreter::visitVAEndInst(VAEndInst &I) {
 
 void Interpreter::visitVACopyInst(VACopyInst &I) {
   ExecutionContext &SF = ECStack.back();
-  SetValue(&I, getOperandValue(*I.arg_begin(), SF), SF);
+  void *Dst = GVTOP(getOperandValue(I.getArgOperand(0), SF));
+  void *Src = GVTOP(getOperandValue(I.getArgOperand(1), SF));
+  GenericValue::IntPair Cursor;
+  std::memcpy(&Cursor, Src, sizeof(Cursor));
+  std::memcpy(Dst, &Cursor, sizeof(Cursor));
 }
 
 void Interpreter::visitIntrinsicInst(IntrinsicInst &I) {
@@ -1156,6 +1166,25 @@ void Interpreter::visitIntrinsicInst(IntrinsicInst &I) {
 }
 
 void Interpreter::visitCallBase(CallBase &I) {
+  // Interpreter::visitCallBase overrides InstVisitor's intrinsic switch, so
+  // llvm.va_start / va_end / va_copy would otherwise be treated as external
+  // calls and never write the in-memory va_list cursor.
+  if (auto *II = dyn_cast<IntrinsicInst>(&I)) {
+    switch (II->getIntrinsicID()) {
+    case Intrinsic::vastart:
+      visitVAStartInst(*cast<VAStartInst>(II));
+      return;
+    case Intrinsic::vaend:
+      visitVAEndInst(*cast<VAEndInst>(II));
+      return;
+    case Intrinsic::vacopy:
+      visitVACopyInst(*cast<VACopyInst>(II));
+      return;
+    default:
+      break;
+    }
+  }
+
   ExecutionContext &SF = ECStack.back();
 
   SF.Caller = &I;
@@ -1765,12 +1794,16 @@ void Interpreter::visitBitCastInst(BitCastInst &I) {
 void Interpreter::visitVAArgInst(VAArgInst &I) {
   ExecutionContext &SF = ECStack.back();
 
-  // Get the incoming valist parameter.  LLI treats the valist as a
-  // (ec-stack-depth var-arg-index) pair.
-  GenericValue VAList = getOperandValue(I.getOperand(0), SF);
+  // The operand is a pointer to the va_list object.  The interpreter
+  // stores a (ec-stack-depth, var-arg-index) cursor in that memory.
+  void *Ptr = GVTOP(getOperandValue(I.getOperand(0), SF));
+  GenericValue::IntPair Cursor;
+  std::memcpy(&Cursor, Ptr, sizeof(Cursor));
+  assert(Cursor.first < ECStack.size() && "va_arg frame cursor out of range");
+  assert(Cursor.second < ECStack[Cursor.first].VarArgs.size() &&
+         "va_arg index past the end of this frame's varargs");
   GenericValue Dest;
-  GenericValue Src = ECStack[VAList.UIntPairVal.first]
-                      .VarArgs[VAList.UIntPairVal.second];
+  GenericValue Src = ECStack[Cursor.first].VarArgs[Cursor.second];
   Type *Ty = I.getType();
   switch (Ty->getTypeID()) {
   case Type::IntegerTyID:
@@ -1787,8 +1820,9 @@ void Interpreter::visitVAArgInst(VAArgInst &I) {
   // Set the Value of this Instruction.
   SetValue(&I, Dest, SF);
 
-  // Move the pointer to the next vararg.
-  ++VAList.UIntPairVal.second;
+  // Advance the in-memory cursor so the next va_arg sees the next extra.
+  ++Cursor.second;
+  std::memcpy(Ptr, &Cursor, sizeof(Cursor));
 }
 
 void Interpreter::visitExtractElementInst(ExtractElementInst &I) {
